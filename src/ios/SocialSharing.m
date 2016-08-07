@@ -8,6 +8,11 @@
 #import <MobileCoreServices/MobileCoreServices.h>
 #import "WeiboSDK.h"
 
+static NSString *const kShareOptionMessage = @"message";
+static NSString *const kShareOptionSubject = @"subject";
+static NSString *const kShareOptionFiles = @"files";
+static NSString *const kShareOptionUrl = @"url";
+
 @implementation SocialSharing {
   UIPopoverController *_popover;
   NSString *_popupCoordinates;
@@ -46,7 +51,7 @@
     }else if([handleUrl.scheme containsString:@"tencent"]){
         [QQApiInterface handleOpenURL:handleUrl delegate:self];
     }
-    
+
 }
 
 
@@ -85,23 +90,46 @@
 }
 
 - (void)share:(CDVInvokedUrlCommand*)command {
+  [self shareInternal:command
+          withOptions:@{
+                        kShareOptionMessage: [command.arguments objectAtIndex:0],
+                        kShareOptionSubject: [command.arguments objectAtIndex:1],
+                        kShareOptionFiles: [command.arguments objectAtIndex:2],
+                        kShareOptionUrl: [command.arguments objectAtIndex:3]
+                      }
+    isBooleanResponse:YES
+];
+}
+
+- (void)shareWithOptions:(CDVInvokedUrlCommand*)command {
+  NSDictionary* options = [command.arguments objectAtIndex:0];
+  [self shareInternal:command
+          withOptions:options
+    isBooleanResponse:NO
+   ];
+}
+
+- (void)shareInternal:(CDVInvokedUrlCommand*)command withOptions:(NSDictionary*)options isBooleanResponse:(BOOL)boolResponse {
   [self.commandDelegate runInBackground:^{ //avoid main thread block  especially if sharing big files from url
     if (!NSClassFromString(@"UIActivityViewController")) {
       CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"not available"];
       [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
       return;
     }
-    
-    NSString *message   = [command.arguments objectAtIndex:0];
-    NSString *subject   = [command.arguments objectAtIndex:1];
-    NSArray  *filenames = [command.arguments objectAtIndex:2];
-    NSString *urlString = [command.arguments objectAtIndex:3];
-    
+
+    NSString *message   = options[kShareOptionMessage];
+    NSString *subject   = options[kShareOptionSubject];
+    NSArray  *filenames = options[kShareOptionFiles];
+    NSString *urlString = options[kShareOptionUrl];
+
     NSMutableArray *activityItems = [[NSMutableArray alloc] init];
+
+    if (message != (id)[NSNull null] && message != nil) {
     [activityItems addObject:message];
-    
-    NSMutableArray *files = [[NSMutableArray alloc] init];
-    if (filenames != (id)[NSNull null] && filenames.count > 0) {
+    }
+
+    if (filenames != (id)[NSNull null] && filenames != nil && filenames.count > 0) {
+      NSMutableArray *files = [[NSMutableArray alloc] init];
       for (NSString* filename in filenames) {
         NSObject *file = [self getImage:filename];
         if (file == nil) {
@@ -113,31 +141,47 @@
       }
       [activityItems addObjectsFromArray:files];
     }
-    
-    if (urlString != (id)[NSNull null]) {
-      [activityItems addObject:[NSURL URLWithString:urlString]];
+
+    if (urlString != (id)[NSNull null] && urlString != nil) {
+        [activityItems addObject:[NSURL URLWithString:[urlString URLEncodedString]]];
     }
-    
+
     UIActivity *activity = [[UIActivity alloc] init];
     NSArray *applicationActivities = [[NSArray alloc] initWithObjects:activity, nil];
     UIActivityViewController *activityVC = [[UIActivityViewController alloc] initWithActivityItems:activityItems applicationActivities:applicationActivities];
-    if (subject != (id)[NSNull null]) {
+    if (subject != (id)[NSNull null] && subject != nil) {
       [activityVC setValue:subject forKey:@"subject"];
     }
-    
-    // TODO deprecated in iOS 8.0, change this some day
-    [activityVC setCompletionHandler:^(NSString *activityType, BOOL completed) {
-      [self cleanupStoredFiles];
-      NSLog(@"SocialSharing app selected: %@", activityType);
-      CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:completed];
-      [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
-    }];
-    
+
+    if ([activityVC respondsToSelector:(@selector(setCompletionWithItemsHandler:))]) {
+      [activityVC setCompletionWithItemsHandler:^(NSString *activityType, BOOL completed, NSArray * returnedItems, NSError * activityError) {
+        [self cleanupStoredFiles];
+        if (boolResponse) {
+          [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsBool:completed]
+                                      callbackId:command.callbackId];
+        } else {
+          NSDictionary * result = @{@"completed":@(completed), @"app":activityType == nil ? @"" : activityType};
+          [self.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:result]
+                                      callbackId:command.callbackId];
+        }
+      }];
+    } else {
+      // let's suppress this warning otherwise folks will start opening issues while it's not relevant
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        [activityVC setCompletionHandler:^(NSString *activityType, BOOL completed) {
+          [self cleanupStoredFiles];
+          NSDictionary * result = @{@"completed":@(completed), @"app":activityType};
+          CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsDictionary:result];
+          [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
+        }];
+#pragma GCC diagnostic warning "-Wdeprecated-declarations"
+      }
+
     NSArray * socialSharingExcludeActivities = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"SocialSharingExcludeActivities"];
     if (socialSharingExcludeActivities!=nil && [socialSharingExcludeActivities count] > 0) {
       activityVC.excludedActivityTypes = socialSharingExcludeActivities;
     }
-    
+
     dispatch_async(dispatch_get_main_queue(), ^(void){
       // iPad on iOS >= 8 needs a different approach
       if ([UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPad) {
@@ -264,27 +308,27 @@
 
 - (void)shareViaInternal:(CDVInvokedUrlCommand*)command
                     type:(NSString *) type {
-  
+
   NSString *message   = [command.arguments objectAtIndex:0];
   // subject is not supported by the SLComposeViewController
   NSArray  *filenames = [command.arguments objectAtIndex:2];
   NSString *urlString = [command.arguments objectAtIndex:3];
-  
+
   // boldly invoke the target app, because the phone will display a nice message asking to configure the app
   SLComposeViewController *composeViewController = [SLComposeViewController composeViewControllerForServiceType:type];
   if (message != (id)[NSNull null]) {
     [composeViewController setInitialText:message];
   }
-  
+
   for (NSString* filename in filenames) {
     UIImage* image = [self getImage:filename];
     if (image != nil) {
       [composeViewController addImage:image];
     }
   }
-  
+
   if (urlString != (id)[NSNull null]) {
-    [composeViewController addURL:[NSURL URLWithString:urlString]];
+    [composeViewController addURL:[NSURL URLWithString:[urlString URLEncodedString]]];
   }
 
   [composeViewController setCompletionHandler:^(SLComposeViewControllerResult result) {
@@ -306,7 +350,7 @@
 
 - (void)shareViaEmail:(CDVInvokedUrlCommand*)command {
   if ([self isEmailAvailable]) {
-    
+
     if (TARGET_IPHONE_SIMULATOR && IsAtLeastiOSVersion(@"8.0")) {
       UIAlertView *alert = [[UIAlertView alloc] initWithTitle:@"SocialSharing plugin"
                                                       message:@"Sharing via email is not supported on the iOS 8 simulator."
@@ -316,38 +360,40 @@
       [alert show];
       return;
     }
-    
+
+    [self cycleTheGlobalMailComposer];
+
     self.globalMailComposer.mailComposeDelegate = self;
-    
+
     if ([command.arguments objectAtIndex:0] != (id)[NSNull null]) {
       NSString *message = [command.arguments objectAtIndex:0];
       BOOL isHTML = [message rangeOfString:@"<[^>]+>" options:NSRegularExpressionSearch].location != NSNotFound;
       [self.globalMailComposer setMessageBody:message isHTML:isHTML];
     }
-    
+
     if ([command.arguments objectAtIndex:1] != (id)[NSNull null]) {
       [self.globalMailComposer setSubject: [command.arguments objectAtIndex:1]];
     }
-    
+
     if ([command.arguments objectAtIndex:2] != (id)[NSNull null]) {
       [self.globalMailComposer setToRecipients:[command.arguments objectAtIndex:2]];
     }
-    
+
     if ([command.arguments objectAtIndex:3] != (id)[NSNull null]) {
       [self.globalMailComposer setCcRecipients:[command.arguments objectAtIndex:3]];
     }
-    
+
     if ([command.arguments objectAtIndex:4] != (id)[NSNull null]) {
       [self.globalMailComposer setBccRecipients:[command.arguments objectAtIndex:4]];
     }
-    
+
     if ([command.arguments objectAtIndex:5] != (id)[NSNull null]) {
       NSArray* attachments = [command.arguments objectAtIndex:5];
       NSFileManager* fileManager = [NSFileManager defaultManager];
       for (NSString* path in attachments) {
         NSURL *file = [self getFile:path];
         NSData* data = [fileManager contentsAtPath:file.path];
-        
+
         NSString* fileName;
         NSString* mimeType;
         NSString* basename = [self getBasenameFromAttachmentPath:path];
@@ -365,14 +411,14 @@
         [self.globalMailComposer addAttachmentData:data mimeType:mimeType fileName:fileName];
       }
     }
-    
+
     // remember the command, because we need it in the didFinishWithResult method
     _command = command;
 
     [self.commandDelegate runInBackground:^{
       [[self getTopMostViewController] presentViewController:self.globalMailComposer animated:YES completion:nil];
     }];
-    
+
   } else {
     CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"not available"];
     [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
@@ -440,7 +486,7 @@
     NSString *message = [options objectForKey:@"message"];
     NSString *subject = [options objectForKey:@"subject"];
     NSString *image = [options objectForKey:@"image"];
-    
+
     MFMessageComposeViewController *picker = [[MFMessageComposeViewController alloc] init];
     picker.messageComposeDelegate = (id) self;
     if (message != (id)[NSNull null]) {
@@ -458,7 +504,7 @@
         }
       }
     }
-    
+
     if (phonenumbers != (id)[NSNull null]) {
       [picker setRecipients:[phonenumbers componentsSeparatedByString:@","]];
     }
@@ -503,7 +549,7 @@
 }
 
 - (void)shareViaInstagram:(CDVInvokedUrlCommand*)command {
-  
+
   // on iOS9 canShareVia('instagram'..) will only work if instagram:// is whitelisted.
   // If it's not, this method will ask permission to the user on iOS9 for opening the app,
   // which is of course better than Instagram sharing not working at all because you forgot to whitelist it.
@@ -526,7 +572,7 @@
     image = [self getImage:filename];
     break;
   }
-  
+
 //  NSData *imageObj = [NSData dataFromBase64String:objectAtIndex0];
   NSString *tmpDir = NSTemporaryDirectory();
   NSString *path = [tmpDir stringByAppendingPathComponent:@"instagram.igo"];
@@ -547,7 +593,11 @@
 
   // remember the command for the delegate method
   _command = command;
-  [_documentInteractionController presentOpenInMenuFromRect:CGRectZero inView:self.webView animated:YES];
+
+  // test for #513
+  dispatch_async(dispatch_get_main_queue(), ^(void){
+    [_documentInteractionController presentOpenInMenuFromRect:CGRectZero inView:self.webView animated:YES];
+  });
 }
 
 - (void)shareViaWhatsApp:(CDVInvokedUrlCommand*)command {
@@ -596,7 +646,7 @@
       if ([shareString isEqual: @""]) {
         shareString = urlString;
       } else {
-        shareString = [NSString stringWithFormat:@"%@ %@", shareString, urlString];
+        shareString = [NSString stringWithFormat:@"%@ %@", shareString, [urlString URLEncodedString]];
       }
     }
     NSString * encodedShareString = [shareString stringByAddingPercentEscapesUsingEncoding:NSUTF8StringEncoding];
@@ -752,7 +802,7 @@
 }
 
 - (void)shareViaWechat:(CDVInvokedUrlCommand *)command{
-    
+
     // on iOS9 canShareVia('whatsapp'..) will only work if whatsapp:// is whitelisted.
     // If it's not, this method will ask permission to the user on iOS9 for opening the app,
     // which is of course better than WhatsApp sharing not working at all because you forgot to whitelist it.
@@ -774,9 +824,9 @@
     }else{
         mScene=WXSceneSession;
     }
-    
+
     // only use the first image (for now.. maybe we can share in a loop?)
-    
+
     if ([command.arguments objectAtIndex:3] != (id)[NSNull null] && filenames != (id)[NSNull null] && [filenames count]>0) {
         NSString *urlString = [command.arguments objectAtIndex:3];
         UIImage* image = nil;
@@ -784,7 +834,7 @@
             image = [self getImage:filename];
             break;
         }
-        
+
         if([WXApiRequestHandler sendLinkURL:urlString TagName:nil Title:subject Description:message ThumbImage:image InScene:mScene]){
             CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
@@ -792,7 +842,7 @@
             CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Error when Sharing"];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
         }
-        
+
     }else if (filenames != (id)[NSNull null] && [filenames count]>0){
         UIImage* image = nil;
         for (NSString* filename in filenames) {
@@ -823,11 +873,11 @@
         CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Arguments error"];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     }
-    
+
 }
 
 - (bool)canShareViaWechat {
-    
+
     return [WXApi isWXAppInstalled]; // requires whitelisting on iOS9
 }
 
@@ -836,7 +886,7 @@
 }
 
 - (void)shareViaQq:(CDVInvokedUrlCommand *)command{
-    
+
     // on iOS9 canShareVia('whatsapp'..) will only work if whatsapp:// is whitelisted.
     // If it's not, this method will ask permission to the user on iOS9 for opening the app,
     // which is of course better than WhatsApp sharing not working at all because you forgot to whitelist it.
@@ -851,7 +901,7 @@
     NSArray  *filenames = [command.arguments objectAtIndex:2];
     bool toZone=[command.arguments objectAtIndex:4]!= (id)[NSNull null]? ![[command.arguments objectAtIndex:4] isEqualToString:@""]:false;
     // only use the first image (for now.. maybe we can share in a loop?)
-    
+
     if ([command.arguments objectAtIndex:3] != (id)[NSNull null] && filenames != (id)[NSNull null] && [filenames count]>0) {
         NSString *urlString = [command.arguments objectAtIndex:3];
         NSString *image = nil;
@@ -859,15 +909,15 @@
             image = filename;
             break;
         }
-        
+
         QQApiNewsObject *newsObj = [QQApiNewsObject
                                     objectWithURL :[NSURL URLWithString:urlString]
                                     title: subject
                                     description :message
                                     previewImageURL:[NSURL URLWithString:image]];
-        
+
         SendMessageToQQReq *req = [SendMessageToQQReq reqWithContent:newsObj];
-        
+
         QQApiSendResultCode sent = toZone?[QQApiInterface SendReqToQZone:req]:[QQApiInterface sendReq:req];
         if (sent == EQQAPISENDSUCESS || sent == EQQAPIAPPSHAREASYNC) {
             CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
@@ -876,21 +926,21 @@
             CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Error when Sharing"];
             [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
         }
-        
+
     }else if (filenames != (id)[NSNull null] && [filenames count]>0){
         UIImage* image = nil;
         for (NSString* filename in filenames) {
             image = [self getImage:filename];
             break;
         }
-        
+
         QQApiImageObject *imgObj = [QQApiImageObject objectWithData:UIImageJPEGRepresentation(image,0.8)
                                                    previewImageData:UIImageJPEGRepresentation(image,0.4)
                                                               title:subject
                                                        description :message];
-        
+
         SendMessageToQQReq *req = [SendMessageToQQReq reqWithContent:imgObj];
-        
+
         QQApiSendResultCode sent = toZone?[QQApiInterface SendReqToQZone:req]:[QQApiInterface sendReq:req];
         if (sent == EQQAPISENDSUCESS) {
             CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_OK];
@@ -915,7 +965,7 @@
         CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"Arguments error"];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
     }
-    
+
 }
 
 - (void) shareViaWeiBo:(CDVInvokedUrlCommand *)command{
@@ -931,7 +981,7 @@
         urlImage = filename;
         break;
     }
-    
+
     if (!weiboAppid || !weiboRedirectURI) {
         CDVPluginResult * pluginResult = [CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@"未配置微博SDK参数"];
         [self.commandDelegate sendPluginResult:pluginResult callbackId:command.callbackId];
@@ -954,7 +1004,7 @@
             [self _sendResult:CDVCommandStatus_ERROR :@"图片获取失败" :command.callbackId];
             return;
         }
-        
+
     }else if(![share_url isEqualToString:@""]){
         WBWebpageObject *webObj=[WBWebpageObject object];
         webObj.webpageUrl=share_url;
@@ -986,46 +1036,46 @@
 }
 
 - (void) onReq:(QQBaseReq *)req{
-    
+
 }
 
 - (void) onResp:(QQBaseResp *)resp{
-    
+
 }
 
 - (void) isOnlineResponse:(NSDictionary *)response{
-    
+
 }
 
 - (void) tencentDidLogin{
-    
+
 }
 
 - (void) tencentDidNotLogin:(BOOL)cancelled{
-    
+
 }
 
 - (void) tencentDidLogout{
-    
+
 }
 
 -(void) tencentDidNotNetWork{
-    
+
 }
 
 /**
  收到一个来自微博客户端程序的请求
- 
+
  收到微博的请求后，第三方应用应该按照请求类型进行处理，处理完后必须通过 [WeiboSDK sendResponse:] 将结果回传给微博
  @param request 具体的请求对象
  */
 - (void)didReceiveWeiboRequest:(WBBaseRequest *)request{
-    
+
 }
 
 /**
  收到一个来自微博客户端程序的响应
- 
+
  收到微博的响应后，第三方应用可以通过响应类型、响应的数据和 WBBaseResponse.userInfo 中的数据完成自己的功能
  @param response 具体的响应对象
  */
@@ -1044,7 +1094,7 @@
             }
         }
     }
-    
+
 }
 
 - (UIImage *)scaleImage:(UIImage *)image toScale:(float)scaleSize
